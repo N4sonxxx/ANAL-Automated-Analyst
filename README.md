@@ -40,7 +40,7 @@ A fully autonomous AI code auditor powered by a 5-model NVIDIA NIM pipeline. Poi
 
 Run the interactive CLI:
 ```bash
-python cli.py
+python ANAL.py
 ```
 
 Alternatively, run the core pipeline directly:
