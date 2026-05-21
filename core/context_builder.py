@@ -153,6 +153,13 @@ Name exact file paths and line numbers wherever possible. Be ruthlessly specific
 """
 
     estimated_tokens = len(user_payload) // 4
+    
+    # ── Token Limit Protection (Max ~60k tokens / 240k chars) ───────────────
+    MAX_PAYLOAD_CHARS = 240_000
+    if len(user_payload) > MAX_PAYLOAD_CHARS:
+        print(f"  [Builder] ⚠️ Payload too large ({len(user_payload)} chars). Truncating to safe limits.")
+        user_payload = user_payload[:MAX_PAYLOAD_CHARS] + "\n\n[... PAYLOAD TRUNCATED TO AVOID TOKEN OVERFLOW ...]\n"
+        estimated_tokens = len(user_payload) // 4
 
     payload = {
         "metadata": {

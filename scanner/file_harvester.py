@@ -95,12 +95,11 @@ def _get_hot_files(project_path: str, extensions: list[str]) -> list[dict]:
                 except OSError:
                     pass
 
-    # Sort by last modified time (newest first)
-    all_files.sort(key=lambda x: x[0], reverse=True)
-    top_files = all_files[:MAX_HOT_FILES]
+    # Don't sort, just grab all of them (up to 500 files to prevent memory issues)
+    top_files = all_files[:500]
 
     result = []
-    for _, full_path in top_files:
+    for mtime, full_path in top_files:
         rel_path = os.path.relpath(full_path, project_path)
         try:
             content = open(full_path, encoding="utf-8", errors="ignore").read()

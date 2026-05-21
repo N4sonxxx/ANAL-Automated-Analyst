@@ -102,6 +102,35 @@ def main():
     else:
         lint_output = linter_runner.run(project_path, profile)
 
+    # -- STEP 3B: Vector Indexing (NV-EmbedCode) -----------------------------
+    print("\n" + SEP)
+    print("  STEP 3B/6 -- Vector Indexing & Retrieval")
+    print(SEP)
+    
+    file_chunks = []
+    chunk_to_file = {}
+    for f in harvested["hot_files"][:100]:  # Limit to 100 files for embedding batch size
+        # Embed the first 2000 chars of each file as its semantic signature
+        chunk_text = f"File: {f['path']}\n\n{f['content'][:2000]}"
+        file_chunks.append(chunk_text)
+        chunk_to_file[chunk_text] = f
+
+    if file_chunks and os.getenv("NIM_API_KEY"):
+        try:
+            embeddings = nim_client.embed_texts(file_chunks)
+            query = "critical business logic, configuration, security vulnerabilities, and core application architecture"
+            top_chunks = nim_client.retrieve_relevant_chunks(query, file_chunks, embeddings, top_k=10)
+            
+            # Replace the harvested files with only the most relevant ones
+            harvested["hot_files"] = [chunk_to_file[c] for c in top_chunks]
+            print(f"  [Embedder] Successfully retrieved {len(harvested['hot_files'])} most relevant files.")
+        except Exception as e:
+            print(f"  [Embedder] Vector indexing skipped/failed: {e}. Falling back to top 10 recent files.")
+            harvested["hot_files"] = harvested["hot_files"][:10]
+    else:
+        harvested["hot_files"] = harvested["hot_files"][:10]
+        print("  [Embedder] API Key not set. Falling back to top 10 recent files.")
+
     # -- STEP 4: Assemble Payload --------------------------------------------
     print("\n" + SEP)
     print("  STEP 4/6 -- Assembling NIM Payload")
@@ -145,7 +174,10 @@ def main():
     print("  STEP 5B/6 -- Nemotron Rerank -- Issue Prioritization")
     print(SEP)
 
-    paragraphs = [p.strip() for p in raw_analysis.split("\n\n") if len(p.strip()) > 50]
+    import re
+    # Split by markdown headers (## or ###) to keep sections intact
+    sections = re.split(r'\n(?=#{2,3}\s)', raw_analysis)
+    paragraphs = [s.strip() for s in sections if len(s.strip()) > 50]
     if len(paragraphs) > 1:
         ranked_paragraphs = nim_client.rerank_issues(
             query="critical bugs, security vulnerabilities, and high-priority performance issues",
