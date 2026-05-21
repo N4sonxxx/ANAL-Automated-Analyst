@@ -1,4 +1,4 @@
-# Universal Project Improver (UPI)
+# Automated Analyst (ANAL)
 
 A fully autonomous AI code auditor powered by a 5-model NVIDIA NIM pipeline. Point UPI at any software project, and it will analyze the codebase, detect bugs, critique the architecture, and generate a structured executive report.
 
