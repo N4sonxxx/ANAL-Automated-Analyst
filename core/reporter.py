@@ -15,7 +15,7 @@ def save(report_text: str, project_path: str, metadata: dict, is_safe: bool, saf
         str: The full path to the saved report file.
     """
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    filename = f"UPI_Report_{today}.md"
+    filename = f"anal_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
     output_path = os.path.join(project_path, filename)
 
     # ── Compose Header Block ─────────────────────────────────────────────────

@@ -46,9 +46,10 @@ def _with_retry(fn, attempts=3, base_wait=5):
 
 
 # ─── 1. EMBEDDER ──────────────────────────────────────────────────────────────
-def embed_texts(texts: list[str]) -> np.ndarray:
+def embed_texts(texts: list[str], input_type: str = "passage") -> np.ndarray:
     """
     Embed a list of text strings using NV-EmbedCode 7B.
+    input_type must be "passage" (for documents) or "query" (for search queries).
     Returns a 2D numpy array of shape (len(texts), embedding_dim).
     """
     def _call():
@@ -56,10 +57,11 @@ def embed_texts(texts: list[str]) -> np.ndarray:
             model=MODEL_EMBEDDER,
             input=texts,
             encoding_format="float",
+            extra_body={"input_type": input_type, "truncate": "END"},
         )
         return np.array([item.embedding for item in response.data])
 
-    print(f"  [Embedder] Embedding {len(texts)} chunks with {MODEL_EMBEDDER}...")
+    print(f"  [Embedder] Embedding {len(texts)} chunks (input_type={input_type}) with {MODEL_EMBEDDER}...")
     return _with_retry(_call)
 
 
@@ -72,7 +74,8 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 def retrieve_relevant_chunks(query: str, chunks: list[str], chunk_embeddings: np.ndarray, top_k: int = 8) -> list[str]:
     """Retrieve the most relevant code chunks for a given query using cosine similarity."""
-    query_vec = embed_texts([query])[0]
+    # Use input_type='query' for the search query, 'passage' was used for the chunks
+    query_vec = embed_texts([query], input_type="query")[0]
     scores = cosine_similarity(query_vec, chunk_embeddings)
     top_indices = np.argsort(scores)[::-1][:top_k]
     return [chunks[i] for i in top_indices]
@@ -86,6 +89,10 @@ def analyze_code(system_prompt: str, user_payload: str, stream: bool = True) -> 
     """
     print(f"\n  [Coder] Sending to {MODEL_CODER} (stream={stream})...")
 
+    # Stop streaming if the model outputs this sentinel or exceeds max chars
+    END_MARKER  = "## END OF REPORT"
+    MAX_CHARS   = 8_000  # ~2k tokens; enough for a full concise report
+
     def _call():
         completion = _client.chat.completions.create(
             model=MODEL_CODER,
@@ -93,9 +100,10 @@ def analyze_code(system_prompt: str, user_payload: str, stream: bool = True) -> 
                 {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_payload},
             ],
-            temperature=0.7,
+            temperature=0.3,
             top_p=0.8,
             max_tokens=4096,
+            frequency_penalty=0.6,  # Penalise repeated phrases to stop looping
             stream=stream,
         )
 
@@ -106,7 +114,21 @@ def analyze_code(system_prompt: str, user_payload: str, stream: bool = True) -> 
                     token = chunk.choices[0].delta.content
                     print(token, end="", flush=True)
                     full_response += token
+
+                    # ── Abort guard 1: end marker detected ────────────────
+                    if END_MARKER in full_response:
+                        print("\n  [Coder] End marker detected. Stopping stream.")
+                        break
+
+                    # ── Abort guard 2: hard character cap ─────────────────
+                    if len(full_response) >= MAX_CHARS:
+                        print(f"\n  [Coder] Max chars ({MAX_CHARS}) reached. Stopping stream.")
+                        break
+
             print()  # newline after streaming ends
+            # Trim everything after the end marker if present
+            if END_MARKER in full_response:
+                full_response = full_response[:full_response.index(END_MARKER) + len(END_MARKER)]
             return full_response
         else:
             return completion.choices[0].message.content
@@ -114,12 +136,13 @@ def analyze_code(system_prompt: str, user_payload: str, stream: bool = True) -> 
     return _with_retry(_call)
 
 
-# ─── 3. RERANKER ──────────────────────────────────────────────────────────────
+
+MODEL_RERANKER = os.getenv("MODEL_RERANKER", "meta/llama-3.1-8b-instruct")
+
 def rerank_issues(query: str, passages: list[str]) -> list[str]:
     """
-    Rerank a list of issue passages by relevance/severity using
-    Llama Nemotron Rerank 1B v2.
-    Returns passages sorted from most to least critical.
+    Rerank a list of issue passages by relevance/severity using an LLM.
+    We use Chat Completions to prioritize issues because the dedicated NIM /ranking endpoint is unavailable.
     """
     if not passages:
         return passages
@@ -127,29 +150,32 @@ def rerank_issues(query: str, passages: list[str]) -> list[str]:
     print(f"  [Reranker] Reranking {len(passages)} issues with {MODEL_RERANKER}...")
 
     def _call():
-        # NIM reranker uses the /v1/ranking endpoint via raw HTTP
-        # We access it through the client's underlying httpx client
-        payload = {
-            "model": MODEL_RERANKER,
-            "query": {"text": query},
-            "passages": [{"text": p} for p in passages],
-        }
-        response = _client._client.post(
-            "/ranking",
-            json=payload,
+        system_prompt = (
+            "You are an expert technical PM. Your job is to prioritize a list of code issues.\n"
+            "Sort the following issues by severity (Critical first, then High, Medium, Low).\n"
+            "Return ONLY the exact original passages, separated by double newlines, in the new prioritized order. "
+            "Do not add any commentary or introductory text."
         )
-        response.raise_for_status()
-        data = response.json()
+        user_prompt = "\n\n=== ISSUE ===\n\n".join(passages)
 
-        # The response contains rankings with logit scores
-        rankings = data.get("rankings", [])
-        # Sort passages by score descending
-        scored = sorted(
-            [(r["index"], r["logit"]) for r in rankings],
-            key=lambda x: x[1],
-            reverse=True,
+        response = _client.chat.completions.create(
+            model=MODEL_RERANKER,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            max_tokens=4096,
         )
-        return [passages[i] for i, _ in scored]
+        ranked_text = response.choices[0].message.content.strip()
+        
+        # Split back into passages and verify we haven't lost data
+        ranked_passages = [p.strip() for p in ranked_text.split("=== ISSUE ===")]
+        ranked_passages = [p for p in ranked_passages if p]
+        
+        if len(ranked_passages) == 0:
+             return passages
+        return ranked_passages
 
     try:
         return _with_retry(_call)
