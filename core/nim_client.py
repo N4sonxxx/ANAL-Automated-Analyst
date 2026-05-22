@@ -185,14 +185,12 @@ def rerank_issues(query: str, passages: list[str]) -> list[str]:
 
 
 # ─── 4. REPORTER (PM Report Generator) ───────────────────────────────────────
-def generate_report(system_prompt: str, raw_analysis: str) -> str:
+def generate_report(system_prompt: str, raw_analysis: str, stream: bool = True) -> str:
     """
     Take the raw Qwen3 analysis output and structure it into a
     clean PM-level report using Nemotron Super 49B v1.5.
     Streams output and returns the full report string.
     """
-    print(f"\n  [Reporter] Structuring report with {MODEL_REPORTER}...")
-
     user_msg = f"""
 You have received the following raw code analysis from the primary coder agent:
 
@@ -213,16 +211,19 @@ Include all sections: Executive Summary, Critical Issues, Architecture Critique,
             ],
             temperature=0.3,
             max_tokens=4096,
-            stream=True,
+            stream=stream,
         )
-        full_response = ""
-        for chunk in completion:
-            if chunk.choices and chunk.choices[0].delta.content is not None:
-                token = chunk.choices[0].delta.content
-                print(token, end="", flush=True)
-                full_response += token
-        print()
-        return full_response
+        if stream:
+            full_response = ""
+            for chunk in completion:
+                if chunk.choices and chunk.choices[0].delta.content is not None:
+                    token = chunk.choices[0].delta.content
+                    print(token, end="", flush=True)
+                    full_response += token
+            print()
+            return full_response
+        else:
+            return completion.choices[0].message.content
 
     return _with_retry(_call)
 

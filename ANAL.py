@@ -36,6 +36,73 @@ from core import context_builder, nim_client, reporter
 # ─── Branding ─────────────────────────────────────────────────────────────────
 console = Console()
 
+
+def _close_terminal():
+    """
+    Close the hosting terminal window on Windows.
+    Walks up the process tree to find and kill the PowerShell or
+    Windows Terminal process that owns this console session.
+    """
+    if os.name != 'nt':
+        return
+    import subprocess
+    import ctypes
+
+    # Strategy 1: Walk up the process chain via wmic and kill the
+    # first powershell / cmd / WindowsTerminal ancestor we find.
+    try:
+        pid = os.getpid()
+        terminal_names = {"powershell.exe", "cmd.exe", "WindowsTerminal.exe", "wt.exe"}
+        # Walk up to 10 levels to find the terminal process
+        for _ in range(10):
+            result = subprocess.run(
+                ["wmic", "process", "where", f"ProcessId={pid}",
+                 "get", "ParentProcessId", "/VALUE"],
+                capture_output=True, text=True, timeout=3
+            )
+            match = None
+            for line in result.stdout.splitlines():
+                if "ParentProcessId" in line:
+                    try:
+                        match = int(line.split("=")[1].strip())
+                    except Exception:
+                        pass
+            if match is None:
+                break
+            pid = match
+            # Check what process that pid is
+            name_result = subprocess.run(
+                ["wmic", "process", "where", f"ProcessId={pid}",
+                 "get", "Name", "/VALUE"],
+                capture_output=True, text=True, timeout=3
+            )
+            for line in name_result.stdout.splitlines():
+                if "Name=" in line:
+                    proc_name = line.split("=")[1].strip().lower()
+                    if proc_name in {n.lower() for n in terminal_names}:
+                        # Kill it and its whole tree
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(pid)],
+                            capture_output=True, timeout=3
+                        )
+                        return  # Terminal process killed — window will close
+    except Exception:
+        pass
+
+    # Strategy 2: Fallback — kill the direct parent PID
+    try:
+        os.kill(os.getppid(), signal.SIGTERM)
+    except Exception:
+        pass
+
+    # Strategy 3: Nuke any powershell that matches this session's console
+    try:
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.PostMessageW(hwnd, 0x0010, 0, 0)
+    except Exception:
+        pass
+
 ASCII_LOGO = """
 [bold purple] █████╗ ███╗   ██╗ █████╗ ██╗
 ██╔══██╗████╗  ██║██╔══██╗██║
@@ -67,69 +134,143 @@ def run_pipeline(
     Execute the full 5-model NIM analysis pipeline on a project directory.
     Returns the path to the saved report, or None on failure / dry-run.
     """
+    import sys
+    import io
+    import contextlib
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
+
     project_path = os.path.abspath(project_path)
 
     if not os.path.isdir(project_path):
         console.print(f"\n[red]  ERROR: Path does not exist or is not a directory:[/red] {project_path}")
         return None
 
+    if not os.getenv("NIM_API_KEY") and not dry_run:
+        console.print("[red]  ERROR: NIM_API_KEY not set. Add it to your .env file.[/red]")
+        return None
+
+    if model_override:
+        os.environ["MODEL_CODER"] = model_override
+
     console.print(f"\n  Target Project: [purple]{project_path}[/purple]\n")
 
-    # ── STEP 1: Project Detection ──────────────────────────────────────────────
-    console.print(SEP)
-    console.print("  STEP 1/6 -- Project Detection")
-    console.print(SEP)
-    profile = project_detector.detect(project_path)
+    progress_console = Console(file=sys.__stdout__)
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=40),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=progress_console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("[purple]Initializing pipeline...", total=100)
+        
+        # Suppress all background print statements to keep UI clean
+        with contextlib.redirect_stdout(io.StringIO()):
+            
+            # ── STEP 1: Project Detection (10%) ──
+            progress.update(task, description="[purple]Step 1/6: Detecting Project...[/purple]")
+            profile = project_detector.detect(project_path)
+            progress.update(task, advance=10)
 
-    # ── STEP 2: Content Harvesting ─────────────────────────────────────────────
-    console.print("\n" + SEP)
-    console.print("  STEP 2/6 -- Content Harvesting")
-    console.print(SEP)
-    harvested = file_harvester.harvest(project_path, profile)
+            # ── STEP 2: Content Harvesting (20%) ──
+            progress.update(task, description="[purple]Step 2/6: Harvesting Content...[/purple]")
+            harvested = file_harvester.harvest(project_path, profile)
+            progress.update(task, advance=10)
 
-    # ── STEP 3: Static Analysis ────────────────────────────────────────────────
-    console.print("\n" + SEP)
-    console.print("  STEP 3/6 -- Static Analysis")
-    console.print(SEP)
-    if skip_linter:
-        lint_output = "Static analysis skipped (--skip-linter)."
-        console.print("  [Linter] Skipped.")
-    else:
-        lint_output = linter_runner.run(project_path, profile)
+            # ── STEP 3: Static Analysis (30%) ──
+            progress.update(task, description="[purple]Step 3/6: Running Static Analysis...[/purple]")
+            if skip_linter:
+                lint_output = "Static analysis skipped (--skip-linter)."
+            else:
+                lint_output = linter_runner.run(project_path, profile)
+            progress.update(task, advance=10)
 
-    # ── STEP 3B: Vector Indexing (NV-EmbedCode) ────────────────────────────────
-    console.print("\n" + SEP)
-    console.print("  STEP 3B/6 -- Vector Indexing & Retrieval")
-    console.print(SEP)
+            # ── STEP 3B: Vector Indexing (40%) ──
+            progress.update(task, description="[purple]Step 3B/6: Vector Indexing & Retrieval...[/purple]")
+            file_chunks    = []
+            chunk_to_file  = {}
+            for f in harvested["hot_files"][:100]:
+                chunk_text = f"File: {f['path']}\n\n{f['content'][:2000]}"
+                file_chunks.append(chunk_text)
+                chunk_to_file[chunk_text] = f
 
-    file_chunks    = []
-    chunk_to_file  = {}
-    for f in harvested["hot_files"][:100]:
-        chunk_text = f"File: {f['path']}\n\n{f['content'][:2000]}"
-        file_chunks.append(chunk_text)
-        chunk_to_file[chunk_text] = f
+            if file_chunks and os.getenv("NIM_API_KEY"):
+                try:
+                    embeddings  = nim_client.embed_texts(file_chunks)
+                    query       = "critical business logic, configuration, security vulnerabilities, and core application architecture"
+                    top_chunks  = nim_client.retrieve_relevant_chunks(query, file_chunks, embeddings, top_k=10)
+                    harvested["hot_files"] = [chunk_to_file[c] for c in top_chunks]
+                except Exception:
+                    harvested["hot_files"] = harvested["hot_files"][:10]
+            else:
+                harvested["hot_files"] = harvested["hot_files"][:10]
+            progress.update(task, advance=10)
 
-    if file_chunks and os.getenv("NIM_API_KEY"):
-        try:
-            embeddings  = nim_client.embed_texts(file_chunks)
-            query       = "critical business logic, configuration, security vulnerabilities, and core application architecture"
-            top_chunks  = nim_client.retrieve_relevant_chunks(query, file_chunks, embeddings, top_k=10)
-            harvested["hot_files"] = [chunk_to_file[c] for c in top_chunks]
-            console.print(f"  [Embedder] Successfully retrieved [green]{len(harvested['hot_files'])}[/green] most relevant files.")
-        except Exception as e:
-            console.print(f"  [Embedder] [yellow]Vector indexing failed: {e}. Using top 10 recent files.[/yellow]")
-            harvested["hot_files"] = harvested["hot_files"][:10]
-    else:
-        harvested["hot_files"] = harvested["hot_files"][:10]
-        console.print("  [Embedder] [dim]API key not set in dry-run. Using top 10 recent files.[/dim]")
+            # ── STEP 4: Assemble Payload (50%) ──
+            progress.update(task, description="[purple]Step 4/6: Assembling NIM Payload...[/purple]")
+            payload = context_builder.assemble(profile, harvested, lint_output)
+            progress.update(task, advance=10)
 
-    # ── STEP 4: Assemble Payload ───────────────────────────────────────────────
-    console.print("\n" + SEP)
-    console.print("  STEP 4/6 -- Assembling NIM Payload")
-    console.print(SEP)
-    payload = context_builder.assemble(profile, harvested, lint_output)
+            if dry_run:
+                # Early exit for dry run
+                pass
+            else:
+                # ── STEP 5A: Qwen3 Coder Deep Analysis (75%) ──
+                progress.update(task, description="[purple]Step 5A/6: AI Coder Analysis (Qwen3 480B)...[/purple]")
+                raw_analysis = nim_client.analyze_code(
+                    system_prompt=payload["coder_system_prompt"],
+                    user_payload=payload["user_payload"],
+                    stream=False,
+                )
+                progress.update(task, advance=25)
 
-    # ── DRY RUN: stop here ─────────────────────────────────────────────────────
+                # ── STEP 5B: Reranker (85%) ──
+                progress.update(task, description="[purple]Step 5B/6: Issue Prioritization (Reranker)...[/purple]")
+                sections   = re.split(r"\n(?=#{2,3}\s)", raw_analysis)
+                paragraphs = [s.strip() for s in sections if len(s.strip()) > 50]
+                if len(paragraphs) > 1:
+                    raw_analysis_ranked = "\n\n".join(
+                        nim_client.rerank_issues(
+                            query="critical bugs, security vulnerabilities, and high-priority performance issues",
+                            passages=paragraphs,
+                        )
+                    )
+                else:
+                    raw_analysis_ranked = raw_analysis
+                progress.update(task, advance=10)
+
+                # ── STEP 5C: Nemotron Super Structuring (95%) ──
+                progress.update(task, description="[purple]Step 5C/6: Report Structuring (Nemotron 49B)...[/purple]")
+                structured_report = nim_client.generate_report(
+                    system_prompt=payload["reporter_system_prompt"],
+                    raw_analysis=raw_analysis_ranked,
+                    stream=False,
+                )
+                progress.update(task, advance=10)
+
+                # ── STEP 5D: Safety Validator (98%) ──
+                progress.update(task, description="[purple]Step 5D/6: Hallucination Validation (Safety 4B)...[/purple]")
+                if skip_safety:
+                    is_safe, safety_note = True, "Safety check skipped."
+                else:
+                    is_safe, safety_note = nim_client.validate_safety(structured_report)
+                progress.update(task, advance=3)
+
+                # ── STEP 6: Save Report (100%) ──
+                progress.update(task, description="[purple]Step 6/6: Saving Final Report...[/purple]")
+                report_path = reporter.save(
+                    report_text=structured_report,
+                    project_path=project_path,
+                    metadata=payload["metadata"],
+                    is_safe=is_safe,
+                    safety_note=safety_note,
+                )
+                progress.update(task, advance=2)
+
+    # ── Print Final Results (Outside Progress Bar) ──
     if dry_run:
         console.print("\n" + "=" * 60)
         console.print("  DRY RUN -- Payload Preview (no API calls made)")
@@ -142,76 +283,12 @@ def run_pipeline(
         console.print(f"\n  Estimated tokens: [purple]~{payload['estimated_tokens']:,}[/purple]")
         console.print("  [dim]Re-run without --dry-run to execute the full pipeline.[/dim]")
         return None
-
-    if not os.getenv("NIM_API_KEY"):
-        console.print("[red]  ERROR: NIM_API_KEY not set. Add it to your .env file.[/red]")
-        return None
-
-    if model_override:
-        os.environ["MODEL_CODER"] = model_override
-
-    # ── STEP 5A: Qwen3 Coder 480B (Streaming) ─────────────────────────────────
-    console.print("\n" + SEP)
-    console.print("  STEP 5A/6 -- Qwen3 Coder 480B -- Deep Analysis (Streaming)")
-    console.print(SEP)
-    raw_analysis = nim_client.analyze_code(
-        system_prompt=payload["coder_system_prompt"],
-        user_payload=payload["user_payload"],
-        stream=True,
-    )
-
-    # ── STEP 5B: Reranker -- Issue Prioritization ──────────────────────────────
-    console.print("\n" + SEP)
-    console.print("  STEP 5B/6 -- Reranker -- Issue Prioritization")
-    console.print(SEP)
-    sections   = re.split(r"\n(?=#{2,3}\s)", raw_analysis)
-    paragraphs = [s.strip() for s in sections if len(s.strip()) > 50]
-    if len(paragraphs) > 1:
-        raw_analysis_ranked = "\n\n".join(
-            nim_client.rerank_issues(
-                query="critical bugs, security vulnerabilities, and high-priority performance issues",
-                passages=paragraphs,
-            )
-        )
     else:
-        raw_analysis_ranked = raw_analysis
-        console.print("  [Reranker] [dim]Not enough sections to rerank. Using original order.[/dim]")
-
-    # ── STEP 5C: Nemotron Super 49B -- Report Structuring (Streaming) ──────────
-    console.print("\n" + SEP)
-    console.print("  STEP 5C/6 -- Nemotron Super 49B -- Report Structuring (Streaming)")
-    console.print(SEP)
-    structured_report = nim_client.generate_report(
-        system_prompt=payload["reporter_system_prompt"],
-        raw_analysis=raw_analysis_ranked,
-    )
-
-    # ── STEP 5D: Content Safety 4B ─────────────────────────────────────────────
-    console.print("\n" + SEP)
-    console.print("  STEP 5D/6 -- Content Safety 4B -- Hallucination Validation")
-    console.print(SEP)
-    if skip_safety:
-        is_safe, safety_note = True, "Safety check skipped (--skip-safety)."
-        console.print("  [Safety] Skipped.")
-    else:
-        is_safe, safety_note = nim_client.validate_safety(structured_report)
+        reporter.print_summary(structured_report)
         status = "[green]SAFE[/green]" if is_safe else "[red]FLAGGED[/red]"
-        console.print(f"  [Safety] Result: {status} — {safety_note}")
-
-    # ── STEP 6: Save Report ────────────────────────────────────────────────────
-    console.print("\n" + SEP)
-    console.print("  STEP 6/6 -- Saving Report")
-    console.print(SEP)
-    report_path = reporter.save(
-        report_text=structured_report,
-        project_path=project_path,
-        metadata=payload["metadata"],
-        is_safe=is_safe,
-        safety_note=safety_note,
-    )
-    reporter.print_summary(structured_report)
-    console.print(f"\n  [green]Done![/green] Full report saved to:\n  [purple]{report_path}[/purple]\n")
-    return report_path
+        console.print(f"\n  [Safety] Result: {status} — {safety_note}")
+        console.print(f"  [green]Done![/green] Full report saved to:\n  [purple]{report_path}[/purple]\n")
+        return report_path
 
 
 # ─── CLI Menu ─────────────────────────────────────────────────────────────────
@@ -398,15 +475,19 @@ def cli_mode():
             elif choice == "4":
                 clear()
                 console.print("\n[purple]goodbye.[/purple]\n")
-                if os.name == 'nt':
-                    try:
-                        os.kill(os.getppid(), signal.SIGTERM)
-                    except Exception:
-                        os.system(f"taskkill /PID {os.getppid()} /F /T >nul 2>&1")
+                _close_terminal()
                 sys.exit(0)
     except KeyboardInterrupt:
         clear()
         console.print("\n[purple]goodbye.[/purple]\n")
+        if os.name == 'nt':
+            try:
+                import ctypes
+                hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+                if hwnd:
+                    ctypes.windll.user32.PostMessageW(hwnd, 0x0010, 0, 0)
+            except Exception:
+                pass
         sys.exit(0)
 
 
