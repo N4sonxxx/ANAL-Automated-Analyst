@@ -16,3 +16,7 @@ pip-delete-this-directory.txt
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Local generated reports & tool states
+.rodok/
+anal_*.md

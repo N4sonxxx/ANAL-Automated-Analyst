@@ -38,12 +38,12 @@ def save(report_text: str, project_path: str, metadata: dict, is_safe: bool, saf
             f.write(full_report)
         print(f"\n  [Reporter] ✅ Report saved to: {output_path}")
     except PermissionError:
-        # If the target project is write-protected, save locally instead
-        fallback_path = os.path.join(os.path.dirname(__file__), "..", filename)
-        fallback_path = os.path.abspath(fallback_path)
+        # If the target project is write-protected, fall back to the working directory
+        fallback_path = os.path.abspath(os.path.join(os.getcwd(), filename))
         with open(fallback_path, "w", encoding="utf-8") as f:
             f.write(full_report)
-        print(f"\n  [Reporter] ⚠️  Could not write to target. Saved locally: {fallback_path}")
+        print(f"\n  [Reporter] ⚠️  Could not write to target (permission denied).")
+        print(f"  [Reporter]     Report saved to working directory instead: {fallback_path}")
         return fallback_path
 
     return output_path

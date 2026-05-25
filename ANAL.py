@@ -35,6 +35,7 @@ from core import context_builder, nim_client, reporter
 
 # ─── Branding ─────────────────────────────────────────────────────────────────
 console = Console()
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _close_terminal():
@@ -387,7 +388,7 @@ def history_menu():
         console.print(Rule("[dim]anal history[/dim]", style="purple"))
         console.print("[dim]main[/dim] / [purple]history[/purple]\n")
 
-        reports = sorted(glob.glob("./anal_*.md"), reverse=True)
+        reports = sorted(glob.glob(os.path.join(SCRIPT_DIR, "anal_*.md")), reverse=True)
 
         if not reports:
             console.print("[dim]No reports found yet. Run an analysis first.[/dim]")
@@ -475,7 +476,6 @@ def cli_mode():
             elif choice == "4":
                 clear()
                 console.print("\n[purple]goodbye.[/purple]\n")
-                _close_terminal()
                 sys.exit(0)
     except KeyboardInterrupt:
         clear()

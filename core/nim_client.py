@@ -91,7 +91,7 @@ def analyze_code(system_prompt: str, user_payload: str, stream: bool = True) -> 
 
     # Stop streaming if the model outputs this sentinel or exceeds max chars
     END_MARKER  = "## END OF REPORT"
-    MAX_CHARS   = 8_000  # ~2k tokens; enough for a full concise report
+    MAX_CHARS   = 24_000  # ~6k tokens; enough for a thorough multi-issue report
 
     def _call():
         completion = _client.chat.completions.create(
@@ -136,8 +136,6 @@ def analyze_code(system_prompt: str, user_payload: str, stream: bool = True) -> 
     return _with_retry(_call)
 
 
-
-MODEL_RERANKER = os.getenv("MODEL_RERANKER", "meta/llama-3.1-8b-instruct")
 
 def rerank_issues(query: str, passages: list[str]) -> list[str]:
     """

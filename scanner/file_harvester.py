@@ -95,8 +95,8 @@ def _get_hot_files(project_path: str, extensions: list[str]) -> list[dict]:
                 except OSError:
                     pass
 
-    # Don't sort, just grab all of them (up to 500 files to prevent memory issues)
-    top_files = all_files[:500]
+    # Sort by mtime descending so the most recently modified files are prioritised
+    top_files = sorted(all_files, key=lambda x: x[0], reverse=True)[:100]
 
     result = []
     for mtime, full_path in top_files:
